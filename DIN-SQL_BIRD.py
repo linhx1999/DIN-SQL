@@ -1,12 +1,10 @@
 import os
 import re
 import pandas as pd
-import json
 import glob
 
 from typing import List, Tuple
 from langchain.sql_database import SQLDatabase
-from langchain.chat_models import ChatOpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import (
     ChatPromptTemplate,
@@ -14,13 +12,6 @@ from langchain.prompts import (
     HumanMessagePromptTemplate,
 )
 
-
-# CHANGE THIS TO YOUR OPENAI API KEY
-
-os.environ["OPENAI_API_KEY"] = ""
-CHAT = ChatOpenAI(model="gpt-4-32k",temperature=0,max_tokens=2000)
-dev_db_path = "dev/dev_databases"
-dev_df = pd.read_json("dev/dev.json")
 
 # ----------------------- #
 
@@ -1150,18 +1141,6 @@ def extract_revised_sql_query(input_text):
     match = re.search(sql_pattern, input_text, re.DOTALL)
     return match.group(1).strip() if match else None
 
-def update_json_file(json_filename, index, sql_query, db_id):
-    try:
-        with open(json_filename, 'r') as json_file:
-            data = json.load(json_file)
-    except FileNotFoundError:
-        data = {}
-
-    data[str(index)] = f"{sql_query}\t----- bird -----\t{db_id}"
-
-    with open(json_filename, 'w') as json_file:
-        json.dump(data, json_file, indent=4)
-
 def table_descriptions_parser(database_dir):
     csv_files = glob.glob(f"{database_dir}/*.csv")
     # Iterate over the CSV files
@@ -1185,16 +1164,8 @@ def table_descriptions_parser(database_dir):
         db_descriptions += "\n"
     return db_descriptions
 
-start_index = 0
-
-if __name__ == "__main__":
-    logs_df = pd.DataFrame(
-        columns=["question","gold_query","db_id","final_query","schema_linking","classification","sql_generation","self_correction"])
-
-    # should be removed in the final version
-    # dev_df = dev_df.sample(frac=0.03).reset_index(drop=True)
-    # print("Number of questions: ", dev_df.shape[0])
-
+def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
+    """Run the original DIN-SQL stages for one question (no gold fields)."""
     system_schema_linking_prompt = SystemMessagePromptTemplate.from_template(SYSTEM_SCHEMA_LINKING_TEMPLATE)  # noqa: E501
     human_schema_linking_prompt = HumanMessagePromptTemplate.from_template(HUMAN_SCHEMA_LINKING_TEMPLATE) # noqa: E501
     schema_linking_prompt = ChatPromptTemplate.from_messages([system_schema_linking_prompt, human_schema_linking_prompt]) # noqa: E501
@@ -1216,85 +1187,94 @@ if __name__ == "__main__":
     system_correction_prompt = SystemMessagePromptTemplate.from_template(SYSTEM_SELF_CORRECTION_PROMPT) # noqa: E501
     human_correction_prompt = HumanMessagePromptTemplate.from_template(HUMAN_SELF_CORRECTION_PROMPT) # noqa: E501
     correction_prompt = ChatPromptTemplate.from_messages([system_correction_prompt, human_correction_prompt]) # noqa: E501
-    accuracy = 0
-    for index,row in dev_df.iterrows():
-        if index < start_index:
-            continue
-        print("Processing row: ", index)
-        db_uri = dev_db_path + "/" + row["db_id"] + "/" + row["db_id"] + ".sqlite"
-        db_descriptions = dev_db_path + "/" + row["db_id"] + "/" + "database_description"  # noqa: E501
-        print("Database: ", db_uri)
-        columns_descriptions = table_descriptions_parser(db_descriptions)
-        schema = get_database_schema(db_uri)
-        question = row["question"]
-        print("Question: ", question)
-        hint = str(row["evidence"])
-        question_id = row["question_id"]
-        chain = LLMChain(llm=CHAT, prompt=schema_linking_prompt)
-        schema_linking = chain.run(question=question, schema=schema, hint=hint, columns_descriptions=columns_descriptions) # noqa: E501
-        schema_links = extract_schema_links(schema_linking)
-        chain = LLMChain(llm=CHAT, prompt=classification_prompt)
-        classification = chain.run(
+    print("Processing row: ", index)
+    db_uri = dev_db_path + "/" + row["db_id"] + "/" + row["db_id"] + ".sqlite"
+    db_descriptions = dev_db_path + "/" + row["db_id"] + "/" + "database_description"  # noqa: E501
+    print("Database: ", db_uri)
+    columns_descriptions = table_descriptions_parser(db_descriptions)
+    schema = get_database_schema(db_uri)
+    question = row["question"]
+    print("Question: ", question)
+    hint = str(row["evidence"])
+    chain = LLMChain(llm=chat, prompt=schema_linking_prompt)
+    schema_linking = chain.run(question=question, schema=schema, hint=hint, columns_descriptions=columns_descriptions) # noqa: E501
+    print("Schema linking:\n", schema_linking, flush=True)
+    schema_links = extract_schema_links(schema_linking)
+    chain = LLMChain(llm=chat, prompt=classification_prompt)
+    classification = chain.run(
+        question=question,
+        schema=schema,
+        hint=hint,
+        columns_descriptions=columns_descriptions,
+        schema_links=schema_links)
+    print("Classification:\n", classification, flush=True)
+    label, sub_questions = extract_label_and_sub_questions(classification)
+    print("Label: ", label)
+    if label is None:
+        raise ValueError("Classification response has no Label")
+    sql_generation = None
+    if "EASY" in label:
+        chain = LLMChain(llm=chat, prompt=easy_prompt)
+        easy = chain.run(
             question=question,
             schema=schema,
             hint=hint,
             columns_descriptions=columns_descriptions,
             schema_links=schema_links)
-        label, sub_questions = extract_label_and_sub_questions(classification)
-        print("Label: ", label)
-        sql_generation = None
-        if "EASY" in label:
-            chain = LLMChain(llm=CHAT, prompt=easy_prompt)
-            easy = chain.run(
-                question=question,
-                schema=schema,
-                hint=hint,
-                columns_descriptions=columns_descriptions,
-                schema_links=schema_links)
-            sql_query = extract_sql_query(easy)
-            sql_generation = easy
-        elif "NON-NESTED" in label:     
-            chain = LLMChain(llm=CHAT, prompt=medium_prompt)
-            medium = chain.run(
-                question=question,
-                schema=schema,
-                hint=hint,
-                columns_descriptions=columns_descriptions,
-                schema_links=schema_links)
-            sql_query = extract_sql_query(medium)
-            sql_generation = medium
-        else:
-            chain = LLMChain(llm=CHAT, prompt=hard_prompt)
-            hard = chain.run(
-                question=question,
-                schema=schema,
-                hint=hint,
-                columns_descriptions=columns_descriptions,
-                schema_links=schema_links,
-                sub_questions=sub_questions)
-            sql_query = extract_sql_query(hard)
-            sql_generation = hard
-        chain = LLMChain(llm=CHAT, prompt=correction_prompt)
-        correction = chain.run(
+        sql_query = extract_sql_query(easy)
+        sql_generation = easy
+    elif "NON-NESTED" in label:
+        chain = LLMChain(llm=chat, prompt=medium_prompt)
+        medium = chain.run(
             question=question,
             schema=schema,
-            columns_descriptions=columns_descriptions,
             hint=hint,
-            sql_query=sql_query)
-        finall_sql = extract_revised_sql_query(correction)
-        if finall_sql is not None:
-            one_liner_sql_query = finall_sql.replace('\n', '').replace('\r', '')
+            columns_descriptions=columns_descriptions,
+            schema_links=schema_links)
+        sql_query = extract_sql_query(medium)
+        sql_generation = medium
+    else:
+        chain = LLMChain(llm=chat, prompt=hard_prompt)
+        hard = chain.run(
+            question=question,
+            schema=schema,
+            hint=hint,
+            columns_descriptions=columns_descriptions,
+            schema_links=schema_links,
+            sub_questions=sub_questions)
+        sql_query = extract_sql_query(hard)
+        sql_generation = hard
+    print("SQL generation:\n", sql_generation, flush=True)
+    chain = LLMChain(llm=chat, prompt=correction_prompt)
+    correction = chain.run(
+        question=question,
+        schema=schema,
+        columns_descriptions=columns_descriptions,
+        hint=hint,
+        sql_query=sql_query)
+    print("Self correction:\n", correction, flush=True)
+    finall_sql = extract_revised_sql_query(correction)
+    if finall_sql is not None:
+        one_liner_sql_query = finall_sql.replace('\n', '').replace('\r', '')
+    else:
+        if sql_query is not None:
+            one_liner_sql_query = sql_query.replace('\n', '').replace('\r', '')
         else:
-            if sql_query is not None:
-                one_liner_sql_query = sql_query.replace('\n', '').replace('\r', '')
-            else:
-                one_liner_sql_query = "SELECT * FROM table" # no query generated, placeholder to avoid errors # noqa: E501
-        new_row_df = pd.DataFrame(
-            [[question,row["SQL"],row["db_id"],one_liner_sql_query,schema_linking, classification, sql_generation, correction]],  # noqa: E501
-            columns=["question","gold_query","db_id","final_query","schema_linking","classification","sql_generation","self_correction"])
-        logs_df = pd.concat([logs_df, new_row_df], ignore_index=True)
-        logs_df.to_csv("logs.csv", index=False)
-        update_json_file("predict_dev.json", index, one_liner_sql_query, row["db_id"])
-        print("final sql query: ", one_liner_sql_query)
-        print("Gold sql query: ", row["SQL"])
-        print("--------------------------------------------------")   
+            raise ValueError("No SQL generated")
+    if not one_liner_sql_query.strip():
+        raise ValueError("Empty SQL generated")
+    print("Final SQL:", one_liner_sql_query, flush=True)
+    return {
+        "question": question,
+        "final_query": one_liner_sql_query,
+        "schema_linking": schema_linking,
+        "classification": classification,
+        "sql_generation": sql_generation,
+        "self_correction": correction,
+    }
+
+
+if __name__ == "__main__":
+    from run_bird_dev import main
+
+    raise SystemExit(main())

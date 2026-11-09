@@ -23,6 +23,69 @@ $ echo "Start running DIN-SQL.py"
 $ python3 DIN-SQL.py --dataset ./data/ --output predicted_sql.txt
 $ echo "Finished running DIN-SQL.py"
 ```
+## BIRD dev
+
+Use Python 3.10 and install `requirements.txt`. The BIRD pipeline uses the
+legacy LangChain/OpenAI interfaces pinned there.
+
+```bash
+bash run_bird_dev.sh
+# Arguments override the wrapper's defaults:
+bash run_bird_dev.sh --workers 4 --output_dir outputs/my_run
+```
+
+Edit the explicit configuration in `run_bird_dev.sh` for the API endpoint,
+model, token budget, dataset and run name. Defaults match the MAG-SQL wrapper:
+local API at `http://127.0.0.1:8000/v1`, model
+`Ministral-3-14B-Reasoning-2512`, 16384 max tokens, 8 worker processes, and
+`../SAGE-SQL/datasets/bird/dev`. The default run name is
+`dinsql_bird_dev_Ministral-3-14B-Reasoning-2512_run_1`.
+
+Input layout:
+
+```text
+<data_root>/dev.json
+<data_root>/dev_databases/<db_id>/<db_id>.sqlite
+<data_root>/dev_databases/<db_id>/database_description/*.csv  # optional
+```
+
+Each question uses the original schema linking, classification, SQL generation
+and self-correction prompts. Gold SQL and difficulty are excluded from worker
+inputs. Only the main process writes shared outputs:
+
+- `<output_dir>/<output_dir_name>.json`: BIRD predictions keyed by original
+  zero-based dataset position, with `SQL\t----- bird -----\tdb_id` values.
+  Failed and unfinished questions retain their positions with empty SQL.
+- `output.jsonl`: durable completion records, including stage outputs or errors.
+- `logs/question_<index>.log`: per-question stage output and exception tracebacks.
+- `logs.csv`: aggregate completed-question records (without gold SQL).
+- `run_config.json`: dataset path/dev.json SHA-256, model, endpoint and token budget.
+  API keys are not stored.
+
+Run the same command to resume. **Every saved completion is skipped, whether
+successful or failed.** Only unfinished questions run again. Completion means a
+record has been flushed to `output.jsonl`; a worker result lost before that point
+will be rerun. A torn final append is saved as `output.jsonl.partial` and removed
+on resume; other checkpoint corruption raises an error. Outputs are rebuilt
+from completion records, and predictions remain in input order.
+
+Resume rejects changed dataset paths/dev.json contents, models, endpoints or
+token budgets; use a new output directory for a different experiment. Worker
+count may change. Keep SQLite files and description CSVs unchanged within a run
+(they are not content-hashed). A directory lock prevents simultaneous writers.
+Single-question exceptions are recorded and processing continues; the command
+exits with status 1 if any completed question failed. Such failures are still
+skipped on subsequent resumes. Process crashes without completion records remain
+unfinished. No benchmark evaluation or automatic retry of completed failures is
+performed.
+
+Runner checks (no model endpoint needed):
+
+```bash
+python -m unittest discover -s tests -v
+bash -n run_bird_dev.sh
+```
+
 ## citation 
 
 ``` 

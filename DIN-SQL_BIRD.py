@@ -15,6 +15,9 @@ from langchain.prompts import (
 
 # ----------------------- #
 
+from sql_response import extract_query
+
+
 SYSTEM_SCHEMA_LINKING_TEMPLATE = """
 You are an agent designed to find the schema_links for generating SQL queries for each question based on the database schema and Foreign keys.
 Hint helps you to fine the correct schema_links.
@@ -615,33 +618,51 @@ Column director_url : column description -> URL to the movie director page on Mu
 Q: What is the name of the longest movie title? When was it released?
 Hint: longest movie title refers to MAX(LENGTH(movie_title)); when it was released refers to movie_release_year;
 Schema_links: [movies.movie_title,movies.movie_release_year, movies.movie_popularity]
-SQL: SELECT movie_title, movie_release_year FROM movies ORDER BY LENGTH(movie_popularity) DESC LIMIT 1
+```sql
+SELECT movie_title, movie_release_year FROM movies ORDER BY LENGTH(movie_popularity) DESC LIMIT 1;
+```
 
 Q: What is the percentage of the ratings were rated by user who was a subcriber?
 Hint: user is a subscriber refers to user_subscriber = 1; percentage of ratings = DIVIDE(SUM(user_subscriber = 1), SUM(rating_score)) as percent;
 Schema_links: [ratings.user_subscriber,1]
-SQL: SELECT CAST(SUM(CASE WHEN user_subscriber = 1 THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(*) FROM ratings
+```sql
+SELECT CAST(SUM(CASE WHEN user_subscriber = 1 THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(*) FROM ratings;
+```
 
 Q: When was the first movie released and who directed it?
 Hint: first movie refers to oldest movie_release_year;
 Schema_links: [movies.movie_release_year, movies.director_name]
-SQL: SELECT movie_release_year, director_name FROM movies WHERE movie_release_year IS NOT NULL ORDER BY movie_release_year ASC LIMIT 1
+```sql
+SELECT movie_release_year, director_name FROM movies WHERE movie_release_year IS NOT NULL ORDER BY movie_release_year ASC LIMIT 1;
+```
 
 Q: How many movie lists were still updated 10 years after it was created?
 Hint: updated 10 years after it was created refers to list_update_timestamp_utc > (list_creation_timestamp_utc+10);
 Schema_links: [lists.list_update_timestamp_utc, lists.list_creation_timestamp_utc, 10]
-SQL: SELECT COUNT(*) FROM lists WHERE SUBSTR(list_update_timestamp_utc, 1, 4) - SUBSTR(list_creation_timestamp_utc, 1, 4) > 10
+```sql
+SELECT COUNT(*) FROM lists WHERE SUBSTR(list_update_timestamp_utc, 1, 4) - SUBSTR(list_creation_timestamp_utc, 1, 4) > 10;
+```
 
 Q: For the list with more than 200 followers, state the title and how long the list has been created?
 Hint: more than 200 followers refers to list_followers >200; how long the list has been created refers to SUBTRACT(CURRENT_TIMESTAMP,list_creation_timestamp_utc)
 Schema_links: [lists.list_title, lists.list_update_timestamp_utc,lists.list_followers, 200]
-SQL: SELECT list_title , 365 * (strftime('%Y', 'now') - strftime('%Y', list_creation_timestamp_utc)) + 30 * (strftime('%m', 'now') - strftime('%m', list_creation_timestamp_utc)) + strftime('%d', 'now') - strftime('%d', list_creation_timestamp_utc) FROM lists WHERE list_followers > 200
+```sql
+SELECT list_title , 365 * (strftime('%Y', 'now') - strftime('%Y', list_creation_timestamp_utc)) + 30 * (strftime('%m', 'now') - strftime('%m', list_creation_timestamp_utc)) + strftime('%d', 'now') - strftime('%d', list_creation_timestamp_utc) FROM lists WHERE list_followers > 200;
+```
 
 Q: What is the percentage of list created by user who was a subscriber when he created the list?
 Hint: was a subscriber refers to user_subscriber = 1; percentage refers to DIVIDE(COUNT(user_subscriber = 1),COUNT(list_id))
 Schema_links: [lists_users.user_subscriber,1]
-SQL: SELECT CAST(SUM(CASE WHEN user_subscriber = 1 THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(list_id) FROM lists_users
+```sql
+SELECT CAST(SUM(CASE WHEN user_subscriber = 1 THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(list_id) FROM lists_users;
+```
 
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
 """  # noqa: E501
 HUMAN_EASY_CLASS_TEMPLATE = """
 Use the schema links to generate the correct sqlite SQL query for the given question.
@@ -656,7 +677,13 @@ Schema of the database with sample rows and column descriptions:
 Q: {question}
 Hint: {hint}
 Schema_links: {schema_links}
-SQL: """
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
+"""
 
 
 SYSTEM_NON_NESTED_CLASS_TEMPLATE = """
@@ -749,7 +776,9 @@ First of all, for joining these tables we have to use the common column = [ratin
 Now, we have to filter the rows where movie_title = 'When Will I Be Loved'.
 Then, we have to find the average of the rating_score.
 So the sqlite SQL query will be:
-SQL: SELECT AVG(T2.rating_score) FROM movies AS T1 INNER JOIN ratings AS T2 ON T1.movie_id = T2.movie_id WHERE T1.movie_title = 'When Will I Be Loved'
+```sql
+SELECT AVG(T2.rating_score) FROM movies AS T1 INNER JOIN ratings AS T2 ON T1.movie_id = T2.movie_id WHERE T1.movie_title = 'When Will I Be Loved';
+```
 
 Q: For movie titled 'Welcome to the Dollhouse', how many percentage of the ratings were rated with highest score.
 Hint: rated with highest score refers to rating_score = 5; percentage = MULTIPLY(DIVIDE(SUM(rating_score = 5), COUNT(rating_score)), 100)
@@ -759,7 +788,9 @@ First of all, for joining these tables we have to use the common column = [ratin
 Now, we have to filter the rows where movie_title = 'Welcome to the Dollhouse'.
 Then, we have to find the percentage of the ratings were rated with highest score which is 5.
 So the sqlite SQL query will be:
-SQL: SELECT CAST(SUM(CASE WHEN T2.rating_score = 5 THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(*) FROM movies AS T1 INNER JOIN ratings AS T2 ON T1.movie_id = T2.movie_id WHERE T1.movie_title = 'Welcome to the Dollhouse'
+```sql
+SELECT CAST(SUM(CASE WHEN T2.rating_score = 5 THEN 1 ELSE 0 END) AS REAL) * 100 / COUNT(*) FROM movies AS T1 INNER JOIN ratings AS T2 ON T1.movie_id = T2.movie_id WHERE T1.movie_title = 'Welcome to the Dollhouse';
+```
 
 Q: For all ratings which are rated in year 2020, name the movies which has the rating scored 4 and above.
 Hint: ratings in year 2020 refers to rating_timestamp_utc like '%2020%'; rating_score > = 4;
@@ -769,7 +800,9 @@ First of all, for joining these tables we have to use the common column = [ratin
 Now, we have to filter the rows where rating_timestamp_utc like '%2020%' and rating_score > = 4.
 Then, we have to find the movie_title.
 So the sqlite SQL query will be:
-SQL: SELECT T2.movie_title FROM ratings AS T1 INNER JOIN movies AS T2 ON T1.movie_id = T2.movie_id WHERE CAST(SUBSTR(T1.rating_timestamp_utc, 1, 4) AS INTEGER) = 2020 AND CAST(SUBSTR(T1.rating_timestamp_utc, 6, 2) AS INTEGER) > 4
+```sql
+SELECT T2.movie_title FROM ratings AS T1 INNER JOIN movies AS T2 ON T1.movie_id = T2.movie_id WHERE CAST(SUBSTR(T1.rating_timestamp_utc, 1, 4) AS INTEGER) = 2020 AND CAST(SUBSTR(T1.rating_timestamp_utc, 6, 2) AS INTEGER) > 4;
+```
 
 Q: What is the average score of the movie \"The Fall of Berlin\" in 2019?
 Hint: The Fall of Berlin' is movie_title; in 2019 refers to rating_timestamp_utc = 2019; Average score refers to Avg(rating_score);
@@ -779,8 +812,16 @@ First of all, for joining these tables we have to use the common column = [ratin
 Now, we have to filter the rows where movie_title = 'The Fall of Berlin' and rating_timestamp_utc = 2019.
 Then, we have to find the average of the rating_score which can be computed by dividing the sum of rating_score by the count of rating_id.
 So the sqlite SQL query will be:
-SQL: SELECT SUM(T1.rating_score) / COUNT(T1.rating_id) FROM ratings AS T1 INNER JOIN movies AS T2 ON T1.movie_id = T2.movie_id WHERE T1.rating_timestamp_utc LIKE '2019%' AND T2.movie_title LIKE 'The Fall of Berlin'
+```sql
+SELECT SUM(T1.rating_score) / COUNT(T1.rating_id) FROM ratings AS T1 INNER JOIN movies AS T2 ON T1.movie_id = T2.movie_id WHERE T1.rating_timestamp_utc LIKE '2019%' AND T2.movie_title LIKE 'The Fall of Berlin';
+```
 
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
 """  # noqa: E501
 HUMAN_NON_NESTED_CLASS_TEMPLATE = """
 Use the the schema links and intermediate reasoning steps to generate the correct sqlite SQL query for the given question.
@@ -795,7 +836,14 @@ Schema of the database with sample rows and column descriptions:
 Q: {question}
 Hint: {hint}
 Schema_links: {schema_links}
-A: Let’s think step by step. """  # noqa: E501
+A: Let’s think step by step.
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
+"""  # noqa: E501
 
 SYSTEM_NESTED_CLASS_TEMPLATE = """
 Use the the schema links and intermediate reasoning steps to generate the correct sqlite SQL query for the given question.
@@ -967,7 +1015,9 @@ The sqlite SQL query for the sub-question "which user has created the movie list
 The above query will return the user_id of the user who has created the movie list \"250 Favourite Films\".
 Now, we have to find the number of movie lists created by the user who has created the movie list \"250 Favourite Films\".
 So, the final sqlite SQL query answer to the question the given question is =
-SQL: SELECT COUNT(list_id) FROM lists_users WHERE user_id = ( SELECT user_id FROM lists WHERE list_title = '250 Favourite Films' )
+```sql
+SELECT COUNT(list_id) FROM lists_users WHERE user_id = ( SELECT user_id FROM lists WHERE list_title = '250 Favourite Films' );
+```
 
 Q: For the user who post the list that contained the most number of the movies, is he/she a paying subscriber when creating that list?
 Hint: the list that contained the most number of the movies refers to MAX(list_movie_number); user_has_payment_method = 1 means the user was a paying subscriber when he created the list ; \nuser_has_payment_method = 0 means the user was not a paying subscriber when he created the list
@@ -978,7 +1028,9 @@ The above query will return the list_movie_number of the list which has the most
 Now, we have to find the user_has_payment_method of the user who has created the list which has the most number of movies.
 To do so, we have to JOIN lists_users and lists table on list_id.
 So, the final sqlite SQL query answer to the question the given question is =
-SQL: SELECT T1.user_has_payment_method FROM lists_users AS T1 INNER JOIN lists AS T2 ON T1.list_id = T2.list_id WHERE T2.list_movie_number = ( SELECT MAX(list_movie_number) FROM lists )
+```sql
+SELECT T1.user_has_payment_method FROM lists_users AS T1 INNER JOIN lists AS T2 ON T1.list_id = T2.list_id WHERE T2.list_movie_number = ( SELECT MAX(list_movie_number) FROM lists );
+```
 
 Q: Which year was the third movie directed by Quentin Tarantino released? Indicate the user ids of the user who gave it a rating score of 4.
 Hint: third movie refers to third movie that has oldest movie_release_year;
@@ -992,8 +1044,16 @@ First of all, for joining these tables we have to use the common column = [movie
 Then, we have to filter the rows where movie_id = ( SELECT movie_id FROM movies WHERE director_name = 'Quentin Tarantino' ORDER BY movie_release_year ASC LIMIT 2, 1 ).
 Then, we have to find the movie_release_year.
 So, the final sqlite SQL query answer to the question the given question is =
-SQL: SELECT T2.movie_release_year, T1.user_id FROM ratings AS T1 INNER JOIN movies AS T2 ON T1.movie_id = T2.movie_id WHERE T1.movie_id = ( SELECT movie_id FROM movies WHERE director_name = 'Quentin Tarantino' ORDER BY movie_release_year ASC LIMIT 2, 1 ) AND T1.rating_score = 4
+```sql
+SELECT T2.movie_release_year, T1.user_id FROM ratings AS T1 INNER JOIN movies AS T2 ON T1.movie_id = T2.movie_id WHERE T1.movie_id = ( SELECT movie_id FROM movies WHERE director_name = 'Quentin Tarantino' ORDER BY movie_release_year ASC LIMIT 2, 1 ) AND T1.rating_score = 4;
+```
 
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
 """  # noqa: E501
 HUMAN_NESTED_CLASS_TEMPLATE = """
 Use the the schema links and intermediate reasoning steps to generate the correct sqlite SQL query for the given question.
@@ -1009,6 +1069,13 @@ Q: {question}
 Hint: {hint}
 Schema_links: {schema_links}
 A: Let's think step by step. the given question can be solved by knowing the answer to the following sub-questions = {sub_questions}
+
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
 """  # noqa: E501
 
 SYSTEM_SELF_CORRECTION_PROMPT = """
@@ -1075,7 +1142,16 @@ A: Let's think step by step to find the correct answer.
 7) CAST is not required as there is no need to cast any columns.
 8) CASE is not required as there is no need to use CASE.
 So, the final sqlite SQL query answer to the question the given question is =
-Revised_SQL: SELECT movie_title FROM movies WHERE movie_release_year = 1945 ORDER BY movie_popularity DESC LIMIT 1
+```sql
+SELECT movie_title FROM movies WHERE movie_release_year = 1945 ORDER BY movie_popularity DESC LIMIT 1;
+```
+
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
 """  # noqa: E501
 HUMAN_SELF_CORRECTION_PROMPT = """
 Evaluate the correctness of this query for the given question.
@@ -1090,7 +1166,14 @@ Schema of the database with sample rows and column descriptions:
 Q: {question}
 Hint: {hint}
 SQL: {sql_query}
-A: Let's think step by step to find the correct answer.""" # noqa: E501
+A: Let's think step by step to find the correct answer.
+Output format requirement: You may explain your reasoning before the final answer. Put the final SQLite query in exactly one Markdown code block tagged sql. Use normal multiline SQL formatting. The block must contain only one complete SELECT or WITH query ending in a semicolon, with no SQL comments. Do not write SQL: or Revised_SQL: labels. Do not put any text after the code block.
+Final answer format:
+```sql
+SELECT ...
+FROM ...;
+```
+""" # noqa: E501
 
 def get_database_schema(DB_URI: str) -> str:
     """Get the database schema from the database URI
@@ -1132,14 +1215,12 @@ def extract_label_and_sub_questions(input_text: str) -> Tuple[str, List[str]]:
     return label, sub_questions
 
 def extract_sql_query(input_text):
-    sql_pattern = r'SQL:\s*(.*?)$'
-    match = re.search(sql_pattern, input_text, re.DOTALL)
-    return match.group(1).strip() if match else None
+    return extract_query(input_text)
+
 
 def extract_revised_sql_query(input_text):
-    sql_pattern = r'Revised_SQL:\s*(.*?)$'
-    match = re.search(sql_pattern, input_text, re.DOTALL)
-    return match.group(1).strip() if match else None
+    return extract_query(input_text, revised=True)
+
 
 def table_descriptions_parser(database_dir):
     csv_files = glob.glob(f"{database_dir}/*.csv")
@@ -1255,10 +1336,10 @@ def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
     print("Self correction:\n", correction, flush=True)
     finall_sql = extract_revised_sql_query(correction)
     if finall_sql is not None:
-        one_liner_sql_query = finall_sql.replace('\n', '').replace('\r', '')
+        one_liner_sql_query = finall_sql
     else:
         if sql_query is not None:
-            one_liner_sql_query = sql_query.replace('\n', '').replace('\r', '')
+            one_liner_sql_query = sql_query
         else:
             raise ValueError("No SQL generated")
     if not one_liner_sql_query.strip():

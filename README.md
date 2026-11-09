@@ -49,9 +49,14 @@ Input layout:
 <data_root>/dev_databases/<db_id>/database_description/*.csv  # optional
 ```
 
-Each question uses the original schema linking, classification, SQL generation
-and self-correction prompts. Gold SQL and difficulty are excluded from worker
-inputs. Only the main process writes shared outputs:
+Each question uses schema linking, classification, SQL generation and
+self-correction. Generation and correction prompts request the final query in
+a single Markdown code block tagged `sql`, allowing normal multiline formatting.
+Extraction prefers the final SQL code block and also accepts legacy `SQL:` /
+`Revised_SQL:` prefixes and bare SELECT/WITH queries. It removes comments and
+normalizes whitespace outside
+quoted literals and identifiers without joining adjacent SQL tokens. Gold SQL
+and difficulty are excluded from worker inputs. Only the main process writes shared outputs:
 
 - `<output_dir>/<output_dir_name>.json`: BIRD predictions keyed by original
   zero-based dataset position, with `SQL\t----- bird -----\tdb_id` values.
@@ -79,7 +84,10 @@ skipped on subsequent resumes. Process crashes without completion records remain
 unfinished. No benchmark evaluation or automatic retry of completed failures is
 performed.
 
-Runner checks (no model endpoint needed):
+After changing prompts or extraction code, use a fresh `--output_dir` to rerun
+previously failed questions and avoid mixing implementations within one run.
+
+Runner and SQL extraction checks (no model endpoint needed):
 
 ```bash
 python -m unittest discover -s tests -v

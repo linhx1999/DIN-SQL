@@ -11,7 +11,10 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
-import traceback
+import time
+import uuid
+
+from generation_log import LoggedClient, append_record
 
 _PIPELINE = None
 _CHAT = None
@@ -29,7 +32,10 @@ def load_pipeline():
 def process_question(index: int, row: dict, config: dict, output_dir: str) -> dict:
     """Keep clients and stdout isolated in each worker process."""
     global _PIPELINE, _CHAT
-    result = {"index": index, "db_id": row["db_id"], "question": row["question"]}
+    started = time.monotonic()
+    execution_id = uuid.uuid4().hex
+    original_client = None
+    result = {"execution_id": execution_id, "index": index, "db_id": row["db_id"], "question": row["question"]}
     log_path = Path(output_dir) / "logs" / f"question_{index}.log"
     with log_path.open("a", encoding="utf-8", buffering=1) as log:
         with redirect_stdout(log), redirect_stderr(log):
@@ -46,6 +52,13 @@ def process_question(index: int, row: dict, config: dict, output_dir: str) -> di
                         max_tokens=config["max_tokens"],
                         openai_api_base=config["api_base"],
                     )
+                if hasattr(_CHAT, "client"):
+                    original_client = _CHAT.client
+                    _CHAT.client = LoggedClient(original_client, output_dir, {
+                        "idx": index, "db_id": row["db_id"],
+                        "execution_id": execution_id,
+                        "session_id": config.get("session_id"),
+                    })
                 result.update(
                     _PIPELINE.run_question(
                         index,
@@ -56,8 +69,13 @@ def process_question(index: int, row: dict, config: dict, output_dir: str) -> di
                 )
                 result["status"] = "success"
             except Exception as exc:
-                traceback.print_exc()
-                result.update(status="failed", final_query="", error=str(exc))
+                # Provider exception text can echo credentials; retain its class only.
+                print(f"Question failed: {type(exc).__name__}", flush=True)
+                result.update(status="failed", final_query="", error=type(exc).__name__)
+            finally:
+                if original_client is not None:
+                    _CHAT.client = original_client
+                result["exec_time"] = time.monotonic() - started
             print(f"Completed question {index}: {result['status']}", flush=True)
     return result
 
@@ -128,6 +146,8 @@ def export_results(output_dir: Path, rows: list, completed: dict) -> None:
         "sql_generation",
         "self_correction",
         "error",
+        "exec_time",
+        "execution_id",
     ]
     temporary = output_dir / "logs.csv.tmp"
     with temporary.open("w", encoding="utf-8", newline="") as stream:
@@ -137,7 +157,7 @@ def export_results(output_dir: Path, rows: list, completed: dict) -> None:
     temporary.replace(output_dir / "logs.csv")
 
 
-def run(args: argparse.Namespace, output_dir: Path) -> int:
+def _run(args: argparse.Namespace, output_dir: Path, session_id: str) -> int:
     data_root = args.data_root.resolve()
     dataset = (data_root / "dev.json").read_bytes()
     data = json.loads(dataset)
@@ -172,6 +192,7 @@ def run(args: argparse.Namespace, output_dir: Path) -> int:
         if (output_dir / "output.jsonl").exists():
             raise ValueError("Checkpoint exists without run_config.json")
         atomic_json(config_path, config)
+    config = dict(config, session_id=session_id)
     (output_dir / "logs").mkdir(exist_ok=True)
     checkpoint = output_dir / "output.jsonl"
     completed = read_completed(checkpoint, rows)
@@ -214,6 +235,28 @@ def run(args: argparse.Namespace, output_dir: Path) -> int:
         f"Finished: {len(completed)} completed, {failures} failed. Output: {output_dir}"
     )
     return 1 if failures else 0
+
+
+def run(args: argparse.Namespace, output_dir: Path) -> int:
+    session_id = uuid.uuid4().hex
+    started = time.monotonic()
+    record = {
+        "session_id": session_id, "started_unix": time.time(),
+        "workers": args.workers, "status": "interrupted_or_failed",
+        "request_scope": "sdk_invocation",
+        "internal_sdk_retries": "not individually observed; original retry policy unchanged",
+        "code_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                        for name in ["run_bird_dev.py", "DIN-SQL_BIRD.py", "generation_log.py"]},
+    }
+    try:
+        code = _run(args, output_dir, session_id)
+        record.update(status="completed", exit_code=code)
+        return code
+    finally:
+        record["run_time"] = time.monotonic() - started
+        record["scope"] = "this invocation only; excludes previous resume sessions"
+        append_record(output_dir / "run_sessions.jsonl", record)
+        atomic_json(output_dir / "run_time.json", record)
 
 
 def main() -> int:

@@ -1245,6 +1245,13 @@ def table_descriptions_parser(database_dir):
         db_descriptions += "\n"
     return db_descriptions
 
+def set_log_stage(chat, stage: str) -> None:
+    """Label telemetry without changing the stage prompt or retry behavior."""
+    from generation_log import LoggedClient
+    if isinstance(getattr(chat, "client", None), LoggedClient):
+        chat.client.set_stage(stage)
+
+
 def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
     """Run the original DIN-SQL stages for one question (no gold fields)."""
     system_schema_linking_prompt = SystemMessagePromptTemplate.from_template(SYSTEM_SCHEMA_LINKING_TEMPLATE)  # noqa: E501
@@ -1277,10 +1284,12 @@ def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
     question = row["question"]
     print("Question: ", question)
     hint = str(row["evidence"])
+    set_log_stage(chat, "schema_linking")
     chain = LLMChain(llm=chat, prompt=schema_linking_prompt)
     schema_linking = chain.run(question=question, schema=schema, hint=hint, columns_descriptions=columns_descriptions) # noqa: E501
     print("Schema linking:\n", schema_linking, flush=True)
     schema_links = extract_schema_links(schema_linking)
+    set_log_stage(chat, "classification")
     chain = LLMChain(llm=chat, prompt=classification_prompt)
     classification = chain.run(
         question=question,
@@ -1295,6 +1304,7 @@ def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
         raise ValueError("Classification response has no Label")
     sql_generation = None
     if "EASY" in label:
+        set_log_stage(chat, "sql_generation_easy")
         chain = LLMChain(llm=chat, prompt=easy_prompt)
         easy = chain.run(
             question=question,
@@ -1305,6 +1315,7 @@ def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
         sql_query = extract_sql_query(easy)
         sql_generation = easy
     elif "NON-NESTED" in label:
+        set_log_stage(chat, "sql_generation_non_nested")
         chain = LLMChain(llm=chat, prompt=medium_prompt)
         medium = chain.run(
             question=question,
@@ -1315,6 +1326,7 @@ def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
         sql_query = extract_sql_query(medium)
         sql_generation = medium
     else:
+        set_log_stage(chat, "sql_generation_nested")
         chain = LLMChain(llm=chat, prompt=hard_prompt)
         hard = chain.run(
             question=question,
@@ -1326,6 +1338,7 @@ def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
         sql_query = extract_sql_query(hard)
         sql_generation = hard
     print("SQL generation:\n", sql_generation, flush=True)
+    set_log_stage(chat, "self_correction")
     chain = LLMChain(llm=chat, prompt=correction_prompt)
     correction = chain.run(
         question=question,

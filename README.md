@@ -56,13 +56,13 @@ Extraction prefers the final SQL code block and also accepts legacy `SQL:` /
 `Revised_SQL:` prefixes and bare SELECT/WITH queries. It removes comments and
 normalizes whitespace outside
 quoted literals and identifiers without joining adjacent SQL tokens. Gold SQL
-and difficulty are excluded from worker inputs. Only the main process writes shared outputs:
+and difficulty are excluded from worker inputs. The main process writes shared predictions and checkpoints; workers append request telemetry under a process lock:
 
 - `<output_dir>/<output_dir_name>.json`: BIRD predictions keyed by original
   zero-based dataset position, with `SQL\t----- bird -----\tdb_id` values.
   Failed and unfinished questions retain their positions with empty SQL.
 - `output.jsonl`: durable completion records, including stage outputs or errors.
-- `logs/question_<index>.log`: per-question stage output and exception tracebacks.
+- `logs/question_<index>.log`: per-question stage output and exception classes.
 - `logs.csv`: aggregate completed-question records (without gold SQL).
 - `run_config.json`: dataset path/dev.json SHA-256, model, endpoint and token budget.
   API keys are not stored.
@@ -105,3 +105,39 @@ bash -n run_bird_dev.sh
 }
 ```
 
+
+### Generation cost telemetry
+
+`run_bird_dev.py` now records generation cost automatically; the existing shell
+launcher needs no additional flag. Use a new `RUN_NAME` / output directory for
+a complete cost experiment. Resuming an old run still skips all saved completions:
+missing historical cost data cannot be reconstructed by resuming.
+
+- `llm_attempts.jsonl`: process-locked, flushed request records with `idx`,
+  session/execution IDs, stage, call ID, attempt number, model, input/output/
+  reasoning tokens, elapsed time, finish reason, and exception class. Stages
+  distinguish schema linking, classification, SQL generation (three branches),
+  and self-correction. Request text, API keys, and raw exception messages are
+  not included. A request success means a response was returned, not correct SQL.
+- `output.jsonl` and `logs.csv`: add `exec_time` and `execution_id`; failures
+  also retain elapsed time. Existing prediction format and completion-based
+  resume rules remain unchanged. Exception details are reduced to class names
+  in per-question logs and results to avoid exposing provider-echoed credentials.
+- `run_sessions.jsonl`: append one record per invocation, including code hashes,
+  worker count, completion state, and duration. `run_time.json` holds only the
+  latest invocation, not the sum across resumes. Python `finally` records failed
+  runs too, but SIGKILL/machine failure can prevent session finalization.
+
+Calls are measured at the legacy SDK `create` boundary. LangChain retry attempts
+crossing this boundary are visible; any internal SDK retries are not individually
+observable. The original retry settings, prompts, and token limits are unchanged.
+Missing token usage is null, never zero. Reasoning tokens may be included in
+completion tokens and must not simply be added to them. Per-question time includes
+worker setup, schema processing and retry waiting, but excludes executor queueing;
+request time and run wall time are separate measures, neither representing GPU time.
+Preserve all request records when a crashed question is retried: `execution_id`
+distinguishes those costs from the final saved completion. Do not infer complete
+cost coverage from complete predictions if the run began before telemetry existed.
+
+Offline verification: `python -m unittest discover -s tests -v` (mock requests;
+no inference or benchmark evaluation).

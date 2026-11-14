@@ -434,16 +434,14 @@ SQL: SELECT T3.title ,  T3.credits FROM classroom AS T1 JOIN SECTION AS T2 ON T1
 '''
 #----------------------------------------------------------------------------------------------------------
 
-if sys.argv[1] == "--dataset" and sys.argv[3] == "--output":
-    DATASET_SCHEMA = sys.argv[2]+"tables.json"
-    DATASET = sys.argv[2]+"dev.json"
+if __name__ == "__main__":
+    if len(sys.argv) != 5 or sys.argv[1] != "--dataset" or sys.argv[3] != "--output":
+        raise ValueError("Use --dataset <directory/> --output <predictions.sql>")
+    DATASET_SCHEMA = os.path.join(sys.argv[2], "tables.json")
+    DATASET = os.path.join(sys.argv[2], "dev.json")
     OUTPUT_FILE = sys.argv[4]
-else:
-    raise Exception("Please use this format python CoT.py --dataset data/ --output predicted_sql.txt")
 
-API_KEY = #key
-os.environ["OPENAI_API_KEY"] = API_KEY
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai.api_key = os.environ.get("OPENAI_API_KEY", "EMPTY")
 
 
 def load_data(DATASET):

@@ -141,3 +141,19 @@ cost coverage from complete predictions if the run began before telemetry existe
 
 Offline verification: `python -m unittest discover -s tests -v` (mock requests;
 no inference or benchmark evaluation).
+
+### Spider dev
+
+Run `bash run_spider_dev.sh` in the DIN-SQL environment. Set the endpoint,
+model, temperature (default 0), token limit (16384), workers (8) and run ID
+at the top of the script. Data defaults to `../SAGE-SQL/datasets/spider`.
+The shared runner selects the original `DIN-SQL.py` Spider prompt builders,
+with schema linking, classification, generation and correction stages. It
+uses the configured token limit for each stage instead of the legacy 600/350
+limits, and the existing SDK error handling instead of infinite retry loops.
+It writes ordered `pred_dev.sql`, checkpoints and cost logs under
+`outputs/dinsql_spider_dev_<model>_<run_id>/`. Failed/missing predictions retain
+nonempty invalid SQL placeholders. Gold SQL is excluded from worker inputs.
+Rerunning the same configuration resumes recorded terminal questions; failed
+terminal questions are also skipped. Use new run IDs for independent repeats.
+Evaluation is separate; point SAGE-SQL's `eval_spider_dev.sh` at `pred_dev.sql`.

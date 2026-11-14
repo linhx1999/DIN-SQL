@@ -20,9 +20,9 @@ _PIPELINE = None
 _CHAT = None
 
 
-def load_pipeline():
+def load_pipeline(dataset="bird"):
     spec = importlib.util.spec_from_file_location(
-        "din_sql_bird", Path(__file__).with_name("DIN-SQL_BIRD.py")
+        "din_sql_pipeline", Path(__file__).with_name("spider_pipeline.py" if dataset == "spider" else "DIN-SQL_BIRD.py")
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -42,13 +42,13 @@ def process_question(index: int, row: dict, config: dict, output_dir: str) -> di
             print(f"Starting question {index}", flush=True)
             try:
                 if _PIPELINE is None:
-                    _PIPELINE = load_pipeline()
+                    _PIPELINE = load_pipeline(config.get("dataset", "bird"))
                 if _CHAT is None:
                     from langchain.chat_models import ChatOpenAI
 
                     _CHAT = ChatOpenAI(
                         model=config["model"],
-                        temperature=0,
+                        temperature=config.get("temperature", 0),
                         max_tokens=config["max_tokens"],
                         openai_api_base=config["api_base"],
                     )
@@ -63,7 +63,7 @@ def process_question(index: int, row: dict, config: dict, output_dir: str) -> di
                     _PIPELINE.run_question(
                         index,
                         row,
-                        str(Path(config["data_root"]) / "dev_databases"),
+                        str(Path(config["data_root"]) / ("database" if config.get("dataset") == "spider" else "dev_databases")),
                         _CHAT,
                     )
                 )
@@ -135,6 +135,15 @@ def export_results(output_dir: Path, rows: list, completed: dict) -> None:
         for index, row in enumerate(rows)
     }
     atomic_json(output_dir / f"{output_dir.name}.json", predictions)
+    config_path = output_dir / "run_config.json"
+    if config_path.exists() and json.loads(config_path.read_text()).get("dataset") == "spider":
+        lines = []
+        for index in range(len(rows)):
+            sql = completed.get(index, {}).get("final_query", "")
+            lines.append(sql.replace("\n", " ").replace("\r", " ").replace("\t", " ").strip() or "SELECT * FROM __din_failed_prediction__")
+        temp = output_dir / "pred_dev.sql.tmp"
+        temp.write_text("\n".join(lines) + "\n")
+        temp.replace(output_dir / "pred_dev.sql")
     columns = [
         "index",
         "question",
@@ -158,6 +167,7 @@ def export_results(output_dir: Path, rows: list, completed: dict) -> None:
 
 
 def _run(args: argparse.Namespace, output_dir: Path, session_id: str) -> int:
+    dataset_name = getattr(args, "dataset", "bird")
     data_root = args.data_root.resolve()
     dataset = (data_root / "dev.json").read_bytes()
     data = json.loads(dataset)
@@ -171,7 +181,7 @@ def _run(args: argparse.Namespace, output_dir: Path, session_id: str) -> int:
         for row in data
     ]
     for db_id in {row["db_id"] for row in rows}:
-        database = data_root / "dev_databases" / db_id / f"{db_id}.sqlite"
+        database = data_root / ("database" if dataset_name == "spider" else "dev_databases") / db_id / f"{db_id}.sqlite"
         if not database.is_file():
             raise FileNotFoundError(database)
     config = {
@@ -182,6 +192,9 @@ def _run(args: argparse.Namespace, output_dir: Path, session_id: str) -> int:
         "api_base": os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1"),
         "max_tokens": args.max_tokens,
     }
+    if dataset_name == "spider":
+        config.update(dataset="spider", temperature=getattr(args, "temperature", 0.0),
+                      tables_sha256=hashlib.sha256((data_root / "tables.json").read_bytes()).hexdigest())
     config_path = output_dir / "run_config.json"
     if config_path.exists():
         if json.loads(config_path.read_text(encoding="utf-8")) != config:
@@ -204,7 +217,7 @@ def _run(args: argparse.Namespace, output_dir: Path, session_id: str) -> int:
     )
     if pending:
         # Fail setup before marking any questions completed when dependencies are missing.
-        load_pipeline()
+        load_pipeline(dataset_name)
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("Set OPENAI_API_KEY (use EMPTY for a local endpoint)")
         with checkpoint.open("a", encoding="utf-8") as stream:
@@ -246,7 +259,7 @@ def run(args: argparse.Namespace, output_dir: Path) -> int:
         "request_scope": "sdk_invocation",
         "internal_sdk_retries": "not individually observed; original retry policy unchanged",
         "code_sha256": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-                        for name in ["run_bird_dev.py", "DIN-SQL_BIRD.py", "generation_log.py"]},
+                        for name in ["run_bird_dev.py", "DIN-SQL_BIRD.py", "DIN-SQL.py", "spider_pipeline.py", "generation_log.py"]},
     }
     try:
         code = _run(args, output_dir, session_id)
@@ -261,6 +274,8 @@ def run(args: argparse.Namespace, output_dir: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", choices=("bird", "spider"), default="bird")
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--data_root", type=Path, default=Path("dev"))
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument(
@@ -268,6 +283,8 @@ def main() -> int:
     )
     parser.add_argument("--workers", type=int, default=8)
     args = parser.parse_args()
+    if not 0 <= args.temperature <= 2:
+        parser.error("temperature must be between 0 and 2")
     if args.workers < 1 or args.max_tokens < 1:
         parser.error("workers and max_tokens must be positive")
     output_dir = args.output_dir.resolve()

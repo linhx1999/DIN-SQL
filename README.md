@@ -157,3 +157,13 @@ nonempty invalid SQL placeholders. Gold SQL is excluded from worker inputs.
 Rerunning the same configuration resumes recorded terminal questions; failed
 terminal questions are also skipped. Use new run IDs for independent repeats.
 Evaluation is separate; point SAGE-SQL's `eval_spider_dev.sh` at `pred_dev.sql`.
+
+Spider chat-response v2 accepts quoted/unquoted classification labels and
+optional sub-question lists, requests complete SQL at generation/correction,
+and uses the shared fenced/labelled SQL extractor without prepending SELECT
+to prose. Correction has no legacy text stop sequences. Final SQL is checked
+with read-only SQLite EXPLAIN before success is recorded. Failure records keep
+stage responses and the failure stage. No gold answers are used for selection.
+The protocol and pipeline hash are part of Spider resume identity; v1 output
+folders cannot be resumed as v2. Use a new `--output_dir` to keep old outputs
+intact. Validate a small dataset copy before a full rerun.

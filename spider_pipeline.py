@@ -21,46 +21,96 @@ def load_prompts(schema_path: Path):
     return _PROMPTS
 
 
+class ResponseFormatError(ValueError):
+    """The model did not return a usable stage answer."""
+
+
 def extract_sql(text: str, select_prefix: bool = False) -> str:
-    text = text.strip()
-    if text.startswith('```'):
-        text = re.sub(r'^```(?:sql)?\s*|\s*```$', '', text, flags=re.I).strip()
-    if 'SQL:' in text:
-        text = text.rsplit('SQL:', 1)[1].strip()
-    if select_prefix and not re.match(r'^(SELECT|WITH)\b', text, re.I):
-        text = 'SELECT ' + text
-    if not text:
-        raise ValueError('Empty SQL response')
-    return text
+    # Chat models must return a complete query, not a completion after SELECT.
+    from sql_response import extract_query
+    query = extract_query(text, revised=True)
+    if not query:
+        raise ResponseFormatError("Expected a complete SQL query")
+    return query
+
+
+def parse_classification(text: str) -> tuple[str, str]:
+    import ast
+    # Prefer an explicit final label; tolerate markdown, quotes and casing.
+    labels = re.findall(r"(?:label|classification)\s*[*_:：\s]*[\"'`*]*(NON[- _]NESTED|NESTED|EASY)\b", text, re.I)
+    if not labels:
+        labels = re.findall(r"(?:classified\s+as|class\s+is)\s*[\"'`*]*(NON[- _]NESTED|NESTED|EASY)\b", text, re.I)
+    if not labels:
+        bare = re.fullmatch(r"\s*[\"'`*]*(NON[- _]NESTED|NESTED|EASY)[\"'`*.\s]*", text, re.I)
+        labels = [bare.group(1)] if bare else []
+    if not labels:
+        raise ResponseFormatError("Missing or unrecognized classification label")
+    label = re.sub(r"[- _]", "-", labels[-1].upper())
+    sub_questions = ""
+    matches = list(re.finditer(r"(?:sub[-_ ]?)?questions\s*[*_\s]*[=:：]\s*(\[[\s\S]*?\])", text, re.I))
+    if matches:
+        try:
+            values = ast.literal_eval(matches[-1].group(1))
+            if isinstance(values, list) and all(isinstance(v, str) for v in values):
+                sub_questions = " ; ".join(values)
+        except (ValueError, SyntaxError):
+            pass
+    return label, sub_questions
+
+
+def validate_sql(query: str, database: Path) -> None:
+    import sqlite3
+    with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("EXPLAIN " + query).fetchall()
 
 
 def run_question(index: int, row: dict, dev_db_path: str, chat) -> dict:
     prompts = load_prompts(Path(dev_db_path).parent / 'tables.json')
     question, db = row['question'], row['db_id']
+    record = {}
+    stage = 'schema_linking'
 
-    def ask(stage, prompt, stops):
+    def ask(name, prompt, stops=None):
+        nonlocal stage
+        stage = name
         client = getattr(chat, 'client', None)
         if hasattr(client, 'set_stage'):
-            client.set_stage(stage)
+            client.set_stage(name)
         result = chat.predict(prompt, stop=stops)
+        record[name] = result
         if not isinstance(result, str) or not result.strip():
-            raise ValueError('Empty model response')
+            raise ResponseFormatError('Empty model response')
         return result
 
-    linking = ask('schema_linking', prompts.schema_linking_prompt_maker(question, db), ['Q:'])
-    links = linking.split('Schema_links: ', 1)[1] if 'Schema_links: ' in linking else '[]'
-    classification = ask('classification', prompts.classification_prompt_maker(question, db, links[1:]), ['Q:'])
-    label = classification.split('Label: ', 1)[1] if 'Label: ' in classification else '"NESTED"'
-    if '"EASY"' in label:
-        prompt = prompts.easy_prompt_maker(question, db, links)
-    elif '"NON-NESTED"' in label:
-        prompt = prompts.medium_prompt_maker(question, db, links)
-    else:
-        sub_questions = classification.split('questions = ["', 1)[1].split('"]', 1)[0]
-        prompt = prompts.hard_prompt_maker(question, db, links, sub_questions)
-    generated = ask('sql_generation', prompt, ['Q:'])
-    sql = extract_sql(generated)
-    corrected = ask('self_correction', prompts.debuger(question, db, sql), ['#', ';', '\n\n'])
-    return {'final_query': extract_sql(corrected, select_prefix=True),
-            'schema_linking': linking, 'classification': classification,
-            'sql_generation': generated, 'self_correction': corrected}
+    sql_contract = "\nReturn exactly one complete SQLite SELECT or WITH query in a ```sql``` block. Do not return an explanation or a fragment after SELECT."
+    try:
+        linking = ask('schema_linking', prompts.schema_linking_prompt_maker(question, db))
+        match = re.search(r'Schema[_ ]links\s*:\s*(\[[\s\S]*?\])', linking, re.I)
+        links = match.group(1) if match else '[]'
+        classification = ask('classification', prompts.classification_prompt_maker(question, db, links) +
+                             '\nEnd with Label: EASY, NON-NESTED, or NESTED. For NESTED also return Sub_questions: ["question", ...].')
+        label, sub_questions = parse_classification(classification)
+        record['parsed_classification'] = label
+        if label == 'EASY':
+            prompt = prompts.easy_prompt_maker(question, db, links)
+        elif label == 'NON-NESTED':
+            prompt = prompts.medium_prompt_maker(question, db, links)
+        else:
+            record['sub_questions_missing'] = not bool(sub_questions)
+            prompt = prompts.hard_prompt_maker(question, db, links, sub_questions)
+        generated = ask('sql_generation', prompt + sql_contract)
+        sql = extract_sql(generated)
+        # Remove the legacy completion prefix. Preserve the original instructions.
+        correction_prompt = re.sub(r'\nSELECT\s*$', '', prompts.debuger(question, db, sql))
+        corrected = ask('self_correction', correction_prompt + sql_contract +
+                        '\nIf no correction is needed, return the original complete SQL query.')
+        final = extract_sql(corrected)
+        stage = 'final_validation'
+        validate_sql(final, Path(dev_db_path) / db / (db + '.sqlite'))
+        record['final_query'] = final
+        return record
+    except Exception as exc:
+        record['failure_stage'] = stage
+        exc.partial_result = record
+        raise

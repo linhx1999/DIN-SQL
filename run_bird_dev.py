@@ -71,6 +71,7 @@ def process_question(index: int, row: dict, config: dict, output_dir: str) -> di
             except Exception as exc:
                 # Provider exception text can echo credentials; retain its class only.
                 print(f"Question failed: {type(exc).__name__}", flush=True)
+                result.update(getattr(exc, "partial_result", {}))
                 result.update(status="failed", final_query="", error=type(exc).__name__)
             finally:
                 if original_client is not None:
@@ -193,7 +194,9 @@ def _run(args: argparse.Namespace, output_dir: Path, session_id: str) -> int:
         "max_tokens": args.max_tokens,
     }
     if dataset_name == "spider":
-        config.update(dataset="spider", temperature=getattr(args, "temperature", 0.0),
+        config.update(dataset="spider", spider_protocol="chat_response_v2",
+                      pipeline_sha256=hashlib.sha256(Path(__file__).with_name("spider_pipeline.py").read_bytes()).hexdigest(),
+                      temperature=getattr(args, "temperature", 0.0),
                       tables_sha256=hashlib.sha256((data_root / "tables.json").read_bytes()).hexdigest())
     config_path = output_dir / "run_config.json"
     if config_path.exists():
